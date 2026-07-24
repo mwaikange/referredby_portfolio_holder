@@ -1,9 +1,9 @@
-node_modules/
-dist/
-tmp/
-.env
+.next
+node_modules
 .env.local
-.env.*.local
-supabase/.temp/
-supabase/remote-public-schema.sql
+.env*.local
+dist
+coverage
+*.tsbuildinfo
 
+dev-server.log

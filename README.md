@@ -1,55 +1,53 @@
-# ReferredBy Portfolio Holder Portal
+# Portfolio Holder Portal
 
-A responsive React prototype for ReferredBy portfolio holders, financiers, and
-banks. The interface is built from the supplied ReferredBy assets and uses the
-portfolio calculation guide as the source for the demo metrics.
+Standalone portal for portfolio holders. It connects to the same Supabase project as the RBA Admin Portal but does not import or modify the admin codebase.
 
-## Run locally
+## Setup
 
-```bash
-npm install
-npm run dev
+1. Copy `.env.example` to `.env.local`.
+2. Fill in `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+3. Run `npm install`, then `npm run dev`.
+4. Open the local URL and sign in with a Supabase Auth portfolio-holder user.
+
+## Auth Mapping
+
+After login, the app resolves the signed-in Supabase user to a portfolio holder in this order:
+
+1. `portfolio_holder_users.user_id = auth.users.id`, joined to `portfolio_holders`.
+2. `portfolio_holders.auth_user_id = auth.users.id`.
+3. `portfolio_holders.user_id = auth.users.id`.
+4. `portfolio_holders.contact_email` or `company_contact_email` matches the auth email.
+
+The recommended production model is:
+
+```sql
+create table public.portfolio_holder_users (
+  id uuid primary key default gen_random_uuid(),
+  portfolio_holder_id uuid not null references public.portfolio_holders(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  role text not null default 'viewer',
+  created_at timestamptz not null default now(),
+  unique (portfolio_holder_id, user_id)
+);
 ```
 
-Copy `.env.example` to `.env.local` and add the correct Supabase anonymous
-public key before starting Vite:
+## What It Shows
 
-```env
-VITE_SUPABASE_URL=https://trtmufpsqqpitropowgw.supabase.co
-VITE_SUPABASE_ANON_KEY=your-project-anon-key
-```
+- Aggregate allocation, exposure, collections, upcoming collections, available capacity, and funding required.
+- Per-lending-society accounting across `nano_loans`, `term_loans`, and `loan_payments`.
+- Loan status exposure for active, settled, overdue, and approved/awaiting-disbursement loans.
+- Read-only portfolio holder profile and settings/specs view.
 
-Open the local URL printed by Vite and sign in with a Supabase Auth user mapped
-to a portfolio holder.
+## Required RLS
 
-## Included modules
+Before production, enforce policies so a portfolio holder can only select:
 
-- Secure portfolio-holder login
-- Portfolio performance overview and explainable KPI calculations
-- Portfolio and lending-society views
-- Eligible disbursements, selection, and draft batch interaction
-- Loan book and collections monitoring
-- Reconciled risk/rating breakdown
-- Controlled report-export interface
-- Audit timeline
-- Responsive desktop, tablet, and mobile layouts
+- Their own `portfolio_holders` row.
+- Their own `portfolio_holder_specs` row.
+- `lending_societies` where `portfolio_holder_id` matches their holder id.
+- `society_portfolio_specs` for linked societies.
+- `nano_loans` and `term_loans` where `lending_society_id` belongs to one of their societies.
+- `loan_payments` where `lending_society_id` belongs to one of their societies.
+- Minimal borrower/reporting fields from `users`, only where linked through their societies.
 
-## Supabase authentication and migration
-
-The migration in `supabase/migrations/20260723193000_portfolio_holder_portal_auth.sql`
-stores `user_type: portfolio_holder` in supported Supabase Auth app metadata and
-maps each Auth user to `public.portfolio_holder_users`. Matching is based on the
-Auth email and `portfolio_holders.contact_email` or
-`portfolio_holders.company_contact_email`.
-
-After authenticating the Supabase CLI with the account that owns the project:
-
-```bash
-supabase link --project-ref trtmufpsqqpitropowgw
-supabase db push
-```
-
-The UI loads the signed-in holder, linked societies, loan totals, repayments,
-and ratings through RLS-scoped Supabase queries. Financial calculations should
-ultimately move to one versioned decimal-safe database function or calculation
-service; the current client aggregation is a transitional integration layer.
+Profile edits are intentionally disabled until update policies or secure server-side routes are approved.

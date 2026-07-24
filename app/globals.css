@@ -1,0 +1,204 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  background: #f7f8f5;
+  color: #193f4a;
+  --teal-900: #0e2d31;
+  --teal-800: #123a40;
+  --teal-700: #1b4d54;
+  --teal-600: #256670;
+  --teal-500: #317e89;
+  --teal-100: #e4eeef;
+  --teal-50: #f1f6f6;
+  --red-700: #a6272c;
+  --red-600: #c23a34;
+  --red-100: #f7e4e1;
+  --gold-600: #b8842e;
+  --gold-100: #f6ecd9;
+  --green-700: #2c6e49;
+  --green-100: #e4f0e7;
+  --ink: #151a19;
+  --ink-soft: #4b5654;
+  --line: #dde4e2;
+  --paper: #f6f7f5;
+  --card: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: Inter, "Segoe UI", Arial, Helvetica, sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.pattern-strip {
+  background-image: url("/brand/header-pattern.svg");
+  background-size: cover;
+  background-position: center;
+}
+
+.rbp-pattern-band {
+  height: 16px;
+  width: 100%;
+  flex-shrink: 0;
+  background-color: var(--teal-900);
+  background-image:
+    radial-gradient(circle at 9px 24px, transparent 7px, var(--gold-600) 7.5px, var(--gold-600) 9px, transparent 9.5px),
+    radial-gradient(circle at 27px -6px, transparent 11px, var(--red-600) 11.5px, var(--red-600) 13.5px, transparent 14px),
+    radial-gradient(circle at 45px 24px, transparent 7px, var(--teal-500) 7.5px, var(--teal-500) 9px, transparent 9.5px),
+    radial-gradient(circle at 63px -6px, transparent 11px, var(--gold-600) 11.5px, var(--gold-600) 13.5px, transparent 14px);
+  background-size: 72px 32px;
+  background-repeat: repeat-x;
+  background-position: 0 -10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.25);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.rbp-pattern {
+  height: 10px;
+  width: 100%;
+  background-image:
+    radial-gradient(circle at 8px 20px, transparent 5px, var(--teal-700) 5.5px, var(--teal-700) 6.5px, transparent 7px),
+    radial-gradient(circle at 24px -4px, transparent 9px, var(--red-600) 9.5px, var(--red-600) 10.5px, transparent 11px),
+    radial-gradient(circle at 40px 20px, transparent 5px, var(--gold-600) 5.5px, var(--gold-600) 6.5px, transparent 7px);
+  background-size: 32px 20px;
+  background-repeat: repeat-x;
+  background-position: 0 -6px;
+  opacity: 0.9;
+}
+
+.rbp-sidebar {
+  width: 230px;
+  flex-shrink: 0;
+  background: var(--teal-900);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.rbp-sidebar-top {
+  padding: 22px 20px 18px;
+}
+
+.rbp-sidebar-nav {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.rbp-sidebar-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: left;
+  width: 100%;
+}
+
+.rbp-sidebar-bottom {
+  padding: 16px 20px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rbp-sidebar-logout {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  width: 100%;
+  justify-content: center;
+}
+
+.rbp-fade-in {
+  animation: rbpFadeIn 0.35s ease both;
+}
+
+@keyframes rbpFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.mono {
+  font-family: "IBM Plex Mono", "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 760px) {
+  .rbp-shell-body {
+    flex-direction: column;
+  }
+
+  .rbp-sidebar {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+  }
+
+  .rbp-sidebar-top {
+    padding: 10px 6px;
+  }
+
+  .rbp-sidebar-nav {
+    flex-direction: row;
+    padding: 0;
+  }
+
+  .rbp-sidebar-btn {
+    padding: 10px;
+    border-left: none !important;
+    border-bottom: 3px solid transparent;
+    width: auto;
+  }
+
+  .rbp-sidebar-label,
+  .rbp-sidebar-identity {
+    display: none;
+  }
+
+  .rbp-sidebar-bottom {
+    flex-direction: row;
+    align-items: center;
+    border-top: none;
+    padding: 10px 6px;
+  }
+
+  .rbp-sidebar-logout {
+    width: auto;
+    padding: 8px 10px;
+  }
+}
