@@ -30,6 +30,16 @@ function buildPortfolio(holder, societies, loans, payments) {
   );
   const collected = sum(payments, "amount_paid");
   const amountDue = sum(payments, "amount_due");
+  const arrears = payments.reduce(
+    (totals, payment) => {
+      const unpaid = Math.max(number(payment.amount_due) - number(payment.amount_paid), 0);
+      const daysLate = number(payment.days_late);
+      if (daysLate >= 30) totals.over30 += unpaid;
+      else if (daysLate > 0) totals.oneTo30 += unpaid;
+      return totals;
+    },
+    { oneTo30: 0, over30: 0 },
+  );
   const cash = allocation - disbursed + collected;
   const portfolioValue = cash + activeExposure;
   const performance = portfolioValue - allocation;
@@ -50,7 +60,12 @@ function buildPortfolio(holder, societies, loans, payments) {
     utilization: safePercent(disbursed, allocation),
     yield: safePercent(performance, disbursed),
     collectionEfficiency: safePercent(collected, amountDue),
-    par30: 0,
+    par30: safePercent(arrears.over30, activeExposure),
+    arrears: {
+      current: round(Math.max(activeExposure - arrears.oneTo30 - arrears.over30, 0)),
+      oneTo30: round(arrears.oneTo30),
+      over30: round(arrears.over30),
+    },
     activeLoans,
     settledLoans,
     contactPerson: holder.contact_person,
@@ -91,10 +106,59 @@ function buildSocieties(rows, loans, payments, ratings) {
       collected: round(collected),
       efficiency: safePercent(collected, due),
       par30: number(rating?.default_rate),
-      rating: rating?.rating_tier?.slice(0, 1)?.toUpperCase() || "—",
+      rating: rating?.rating_tier || "Not rated",
+      ratingScore: rating?.score == null ? null : number(rating.score),
       trend: 0,
     };
   });
+}
+
+function buildMonthlySeries(loans, payments) {
+  const values = new Map();
+  const ensure = (dateValue) => {
+    if (!dateValue) return null;
+    const date = new Date(dateValue);
+    if (Number.isNaN(date.getTime())) return null;
+    const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+    if (!values.has(key)) {
+      values.set(key, {
+        key,
+        month: date.toLocaleDateString("en-NA", {
+          month: "short",
+          year: "2-digit",
+          timeZone: "UTC",
+        }),
+        disbursed: 0,
+        collected: 0,
+        due: 0,
+      });
+    }
+    return values.get(key);
+  };
+
+  loans.forEach((loan) => {
+    const bucket = ensure(loan.disbursed_at);
+    if (bucket && DISBURSED_STATUSES.has(loan.status)) {
+      bucket.disbursed += number(loan.loan_amount);
+    }
+  });
+  payments.forEach((payment) => {
+    const bucket = ensure(payment.payment_date || payment.created_at);
+    if (bucket) {
+      bucket.collected += number(payment.amount_paid);
+      bucket.due += number(payment.amount_due);
+    }
+  });
+
+  return [...values.values()]
+    .sort((a, b) => a.key.localeCompare(b.key))
+    .slice(-6)
+    .map((item) => ({
+      ...item,
+      disbursed: round(item.disbursed),
+      collected: round(item.collected),
+      due: round(item.due),
+    }));
 }
 
 async function requirePortfolioHolder(user) {
@@ -148,17 +212,17 @@ export async function getPortfolioPortalData(user) {
       ? emptyResult
       : supabase
           .from("nano_loans")
-          .select("id, loan_id, lending_society_id, loan_amount, total_repayable, outstanding_balance, status, disbursed_at")
+          .select("id, loan_id, user_id, lending_society_id, loan_amount, total_repayable, outstanding_balance, status, approved_at, disbursed_at, due_date, first_deduction_date, final_deduction_date")
           .in("lending_society_id", societyIds),
     noSocietyIds
       ? emptyResult
       : supabase
           .from("term_loans")
-          .select("id, loan_id, lending_society_id, loan_amount, total_repayable, outstanding_balance, status, disbursed_at")
+          .select("id, loan_id, user_id, lending_society_id, loan_amount, total_repayable, outstanding_balance, status, approved_at, disbursed_at, due_date, first_deduction_date, final_deduction_date")
           .in("lending_society_id", societyIds),
     supabase
       .from("loan_payments")
-      .select("id, lending_society_id, portfolio_holder_id, amount_due, amount_paid, status, payment_date")
+      .select("id, loan_id, loan_type, lending_society_id, portfolio_holder_id, amount_due, amount_paid, status, payment_date, payment_ref, days_late, created_at")
       .eq("portfolio_holder_id", holderId),
     supabase
       .from("partner_ratings")
@@ -172,7 +236,10 @@ export async function getPortfolioPortalData(user) {
 
   if (firstError) throw firstError;
 
-  const loans = [...(nanoResult.data || []), ...(termResult.data || [])];
+  const loans = [
+    ...(nanoResult.data || []).map((loan) => ({ ...loan, loanType: "Nano loan" })),
+    ...(termResult.data || []).map((loan) => ({ ...loan, loanType: "Term loan" })),
+  ];
   const payments = paymentsResult.data || [];
   const ratings = ratingsResult.data || [];
 
@@ -183,5 +250,6 @@ export async function getPortfolioPortalData(user) {
     societies: buildSocieties(societyRows, loans, payments, ratings),
     loans,
     payments,
+    monthlySeries: buildMonthlySeries(loans, payments),
   };
 }
