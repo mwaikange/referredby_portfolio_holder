@@ -45,6 +45,7 @@ import {
   Settings,
   ShieldCheck,
   TrendingUp,
+  Upload,
   UsersRound,
   WalletCards,
   X,
@@ -79,10 +80,14 @@ const formatDate = (value) => {
     : date.toLocaleDateString("en-NA", { day: "2-digit", month: "short", year: "numeric" });
 };
 
-const maskedBorrower = (userId) =>
-  userId ? `Borrower ••••${userId.slice(-4).toUpperCase()}` : "Borrower unavailable";
+const borrowerReference = (userId) =>
+  userId ? String(userId) : "Borrower unavailable";
 
-const csvCell = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+const spreadsheetSafe = (value) => {
+  const text = String(value ?? "");
+  return /^[=+\-@]/.test(text) ? `'${text}` : text;
+};
+const csvCell = (value) => `"${spreadsheetSafe(value).replaceAll('"', '""')}"`;
 const downloadCsv = (filename, headers, rows) => {
   const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -122,7 +127,7 @@ const pageCopy = {
   overview: ["Portfolio overview", "Capital, performance and risk across your funded loan book."],
   portfolios: ["Portfolios", "Compare capital deployment, returns and exposure."],
   societies: ["Lending societies", "Monitor the organisations funded by this portfolio."],
-  disbursements: ["Disbursements", "Review the approval and disbursement pipeline in read-only mode."],
+  disbursements: ["Pending disbursements", "Select eligible loans, prepare payment instructions and validate uploaded payment results."],
   loans: ["Loan book", "Inspect active, settled and pending loan accounts."],
   collections: ["Collections", "Track scheduled repayments and collection outcomes."],
   risk: ["Risk & ratings", "Understand arrears, concentration and portfolio quality."],
@@ -476,6 +481,264 @@ function PerformanceGauge() {
   );
 }
 
+const ACTIVE_LOAN_STATUSES = new Set(["DU", "OT", "BL"]);
+const percent = (numerator, denominator) => denominator > 0 ? (numerator / denominator) * 100 : null;
+const sumValues = (rows, accessor) => rows.reduce((total, row) => total + Number(accessor(row) || 0), 0);
+const chartPalette = ["#176b73", "#db9438", "#5e62c7", "#2f9d78", "#c94b59", "#3c7fbd", "#8557a8", "#8aa346"];
+
+function HoneycombUnitChart({ items, total, committedTotal, onSelect }) {
+  const usable = items
+    .map((item, index) => ({ ...item, color: item.color || chartPalette[index % chartPalette.length], value: Number(item.value || 0) }))
+    .filter((item) => item.value > 0);
+  const denominator = Number(total || sumValues(usable, (item) => item.value));
+  const committed = Number(committedTotal || denominator);
+
+  if (!usable.length || denominator <= 0) {
+    return <div className="analytics-empty">No allocation values are available for this selection.</div>;
+  }
+  const cellValue = denominator / 100;
+  const unallocatedCommitment = Math.max(committed - denominator, 0);
+  const allocatedShare = committed > 0 ? (denominator / committed) * 100 : null;
+
+  const allocations = usable.map((item) => {
+    const exact = (item.value / denominator) * 100;
+    return { ...item, exact, cells: Math.floor(exact), remainder: exact - Math.floor(exact) };
+  });
+  let remaining = 100 - allocations.reduce((sum, item) => sum + item.cells, 0);
+  [...allocations]
+    .sort((a, b) => b.remainder - a.remainder || a.label.localeCompare(b.label))
+    .forEach((item) => {
+      if (remaining > 0) {
+        const target = allocations.find((entry) => entry.label === item.label);
+        target.cells += 1;
+        remaining -= 1;
+      }
+    });
+  const categoryCells = allocations.flatMap((item) => Array.from({ length: item.cells }, (_, index) => ({ ...item, cellKey: `${item.label}-${index}` })));
+  const boardRadius = 9;
+  const spacing = 13.2;
+  const hexRadius = 11.35;
+  const centerX = 250;
+  const centerY = 188;
+  const boardCells = [];
+  for (let q = -boardRadius; q <= boardRadius; q += 1) {
+    const rowStart = Math.max(-boardRadius, -q - boardRadius);
+    const rowEnd = Math.min(boardRadius, -q + boardRadius);
+    for (let r = rowStart; r <= rowEnd; r += 1) {
+      const x = centerX + spacing * 1.5 * q;
+      const y = centerY + spacing * Math.sqrt(3) * (r + q / 2);
+      const distance = Math.max(Math.abs(q), Math.abs(r), Math.abs(-q - r));
+      const angle = (Math.atan2(y - centerY, x - centerX) + Math.PI * 2) % (Math.PI * 2);
+      boardCells.push({ q, r, x, y, distance, angle, key: `${q}:${r}` });
+    }
+  }
+  const coloredPositions = [...boardCells]
+    .sort((a, b) => a.distance - b.distance || a.angle - b.angle)
+    .slice(0, 100)
+    .sort((a, b) => a.angle - b.angle || a.distance - b.distance);
+  const assignments = new Map(coloredPositions.map((position, index) => [position.key, categoryCells[index]]));
+  const polygonPoints = Array.from({ length: 6 }, (_, index) => {
+    const angle = (Math.PI / 3) * index;
+    return `${(Math.cos(angle) * hexRadius).toFixed(2)},${(Math.sin(angle) * hexRadius).toFixed(2)}`;
+  }).join(" ");
+
+  return (
+    <div className="honeycomb-layout">
+      <div className="honeycomb-visual">
+        <div className="honeycomb-meta"><strong>Society allocation mosaic</strong><span>1 filled hexagon = {money(cellValue)} (1%)</span></div>
+        <div className="mosaic-context">
+          <div><span>Allocated to linked societies</span><strong>{money(denominator)}</strong><small>{usable.length} societies · {allocatedShare == null ? "N/A" : `${allocatedShare.toFixed(1)}%`} of committed capital</small></div>
+          <div><span>Not allocated to a society</span><strong>{money(unallocatedCommitment)}</strong><small>Outside this allocation mosaic</small></div>
+        </div>
+        <div className="honeycomb">
+          <svg className="honeycomb__svg" viewBox="0 -28 500 440" role="img" aria-labelledby="allocation-mosaic-title allocation-mosaic-description">
+            <title id="allocation-mosaic-title">Allocated capital by lending society</title>
+            <desc id="allocation-mosaic-description">One hundred colored hexagons represent the capital allocated across linked lending societies. Each filled cell is one percent of the society-allocated total. Pale surrounding hexagons are a visual reference grid and are not included in any financial total.</desc>
+            {boardCells.map((position) => {
+              const cell = assignments.get(position.key);
+              if (!cell) {
+                return <polygon className="honeycomb__cell honeycomb__cell--neutral" key={position.key} points={polygonPoints} transform={`translate(${position.x} ${position.y})`} aria-hidden="true" />;
+              }
+              const cellLabel = `${cell.label}: ${money(cell.value)}, ${cell.exact.toFixed(1)} percent of selected total`;
+              return (
+                <g
+                  className="honeycomb__unit"
+                  key={position.key}
+                  role="button"
+                  tabIndex="0"
+                  aria-label={cellLabel}
+                  onClick={() => onSelect?.(cell.label)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onSelect?.(cell.label);
+                    }
+                  }}
+                >
+                  <title>{cellLabel}</title>
+                  <polygon className="honeycomb__cell honeycomb__cell--active" points={polygonPoints} transform={`translate(${position.x} ${position.y})`} style={{ fill: cell.color }} />
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+        <div className="mosaic-key"><span><i /> Pale cells: decorative reference grid</span><span><strong>100</strong> filled society-allocation units</span></div>
+        <p className="chart-note">Filled cells divide {money(denominator)} among linked societies using largest-remainder rounding. They do not represent the unallocated commitment. Exact legend values reconcile to 100% of the society-allocated total.</p>
+      </div>
+      <div className="honeycomb-legend" aria-label="Exact allocation legend">
+        {allocations.map((item) => (
+          <button type="button" key={item.label} onClick={() => onSelect?.(item.label)}>
+            <i style={{ background: item.color }} />
+            <span><strong>{item.label}</strong><small>{item.count == null ? "Partner portfolio" : `${item.count} loans`}</small></span>
+            <span className="honeycomb-legend__value"><strong>{money(item.value)}</strong><small>{item.exact.toFixed(1)}%</small></span>
+          </button>
+        ))}
+        <div className="honeycomb-total"><span>Allocated society total</span><strong>{money(denominator)}</strong></div>
+      </div>
+    </div>
+  );
+}
+
+function RankedBars({ items, valueFormatter = money, emptyText = "No values available." }) {
+  const max = Math.max(0, ...items.map((item) => Number(item.value || 0)));
+  if (!items.length || max <= 0) return <div className="analytics-empty">{emptyText}</div>;
+  return (
+    <div className="ranked-bars">
+      {items.map((item, index) => (
+        <div className="ranked-bars__row" key={item.label}>
+          <span className="ranked-bars__rank">{String(index + 1).padStart(2, "0")}</span>
+          <div><div className="ranked-bars__label"><strong>{item.label}</strong><span>{valueFormatter(item.value)}</span></div><div className="ranked-bars__track"><i style={{ width: `${Math.max(2, (item.value / max) * 100)}%`, background: item.color || chartPalette[index % chartPalette.length] }} /></div></div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AnalyticsWorkspace({ onNavigate }) {
+  const { portfolio, societies, loans, payments } = usePortalData();
+  const [tab, setTab] = useState("capital");
+  const activeLoans = loans.filter((loan) => ACTIVE_LOAN_STATUSES.has(loan.status));
+  const pendingLoans = loans.filter((loan) => loan.status === "AD");
+  const pendingAmount = sumValues(pendingLoans, (loan) => loan.loan_amount);
+  const grossBook = sumValues(activeLoans, (loan) => loan.outstanding_balance);
+  const overdueAmount = sumValues(payments, (payment) => Math.max(Number(payment.amount_due || 0) - Number(payment.amount_paid || 0), 0));
+  const dueAmount = sumValues(payments, (payment) => payment.amount_due);
+  const collectedAmount = sumValues(payments, (payment) => payment.amount_paid);
+  const allocationItems = societies.map((society) => ({ label: society.name, value: society.allocation, count: loans.filter((loan) => loan.lending_society_id === society.id).length }));
+
+  const products = [...loans.reduce((map, loan) => {
+    const label = loan.loanType || "Other";
+    const current = map.get(label) || { label, value: 0, original: 0, count: 0 };
+    current.original += Number(loan.loan_amount || 0);
+    current.count += 1;
+    if (ACTIVE_LOAN_STATUSES.has(loan.status)) current.value += Number(loan.outstanding_balance || 0);
+    map.set(label, current);
+    return map;
+  }, new Map()).values()].sort((a, b) => b.value - a.value);
+
+  const maturityLabels = ["≤30 days", "31–90 days", "91–180 days", "181–365 days", ">365 days"];
+  const maturityValues = maturityLabels.map((label) => ({ label, value: 0 }));
+  activeLoans.forEach((loan) => {
+    const due = new Date(loan.final_deduction_date || loan.due_date);
+    const days = Number.isNaN(due.getTime()) ? null : Math.ceil((due.getTime() - Date.now()) / 86400000);
+    const bucket = days == null || days <= 30 ? 0 : days <= 90 ? 1 : days <= 180 ? 2 : days <= 365 ? 3 : 4;
+    maturityValues[bucket].value += Number(loan.outstanding_balance || 0);
+  });
+
+  const paymentRisk = new Map();
+  payments.forEach((payment) => {
+    const current = paymentRisk.get(payment.loan_id) || 0;
+    paymentRisk.set(payment.loan_id, Math.max(current, Number(payment.days_late || 0)));
+  });
+  const parAmount = (days) => sumValues(activeLoans.filter((loan) => (paymentRisk.get(loan.loan_id) || 0) >= days), (loan) => loan.outstanding_balance);
+  const nplAmount = parAmount(90);
+  const qualityRows = [1, 30, 60, 90].map((days) => ({ label: `PAR ${days}+`, value: parAmount(days) }));
+
+  const borrowers = [...loans.reduce((map, loan) => {
+    const key = loan.user_id || `unknown-${loan.id}`;
+    const current = map.get(key) || { id: key, label: borrowerReference(loan.user_id), value: 0, originated: 0, count: 0 };
+    current.count += 1;
+    current.originated += Number(loan.loan_amount || 0);
+    if (ACTIVE_LOAN_STATUSES.has(loan.status)) current.value += Number(loan.outstanding_balance || 0);
+    map.set(key, current);
+    return map;
+  }, new Map()).values()];
+  const topBorrowers = [...borrowers].sort((a, b) => b.value - a.value).slice(0, 10);
+  const repeatBorrowers = [...borrowers].filter((item) => item.count > 1).sort((a, b) => b.count - a.count || b.originated - a.originated).slice(0, 10);
+
+  const analyticsTabs = [
+    ["capital", "A. Capital allocation"],
+    ["loans", "B. Gross loans & advances"],
+    ["quality", "C. Portfolio quality"],
+    ["customers", "D. Customer profiles"],
+  ];
+
+  return (
+    <section className="analytics-workspace">
+      <div className="analytics-tabs" role="tablist" aria-label="JM dashboard categories">
+        {analyticsTabs.map(([id, label]) => <button type="button" role="tab" aria-selected={tab === id} className={tab === id ? "active" : ""} key={id} onClick={() => setTab(id)}>{label}</button>)}
+      </div>
+
+      {tab === "capital" && (
+        <div className="analytics-section">
+          <div className="action-queue-grid">
+            <button type="button" className="action-queue action-queue--amber" onClick={() => onNavigate("disbursements")}><span><Banknote size={19} /></span><div><small>Approved pending disbursement</small><strong>{money(pendingAmount)}</strong><p>{pendingLoans.length} loans require payment action</p></div><ArrowRight size={17} /></button>
+            <div className="action-queue"><span><WalletCards size={19} /></span><div><small>Available cash</small><strong>{money(portfolio.cash)}</strong><p>Before pending obligations and reserves</p></div></div>
+            <div className="action-queue"><span><AlertTriangle size={19} /></span><div><small>Reconciliation check</small><strong>{money(portfolio.allocation - sumValues(societies, (society) => society.allocation))}</strong><p>Holder allocation less society allocations</p></div></div>
+          </div>
+          <article className="panel analytics-panel">
+            <div className="panel__header"><div><h3>Allocated capital by lending society</h3><p>Shows the distribution of society allocations, separately from total committed capital</p></div><span className="formula-version">{portfolio.formulaVersion}</span></div>
+            <HoneycombUnitChart items={allocationItems} total={sumValues(allocationItems, (item) => item.value)} committedTotal={portfolio.allocation} onSelect={() => onNavigate("societies")} />
+          </article>
+          <div className="analytics-kpis">
+            <div><span>Total capital committed</span><strong>{money(portfolio.allocation)}</strong><small>Approved portfolio allocation</small></div>
+            <div><span>Cumulative capital deployed</span><strong>{money(portfolio.disbursed)}</strong><small>{percent(portfolio.disbursed, portfolio.allocation)?.toFixed(1) || "N/A"}% of allocation</small></div>
+            <div><span>Current deployed capital</span><strong>{money(grossBook)}</strong><small>Gross active outstanding principal</small></div>
+            <div><span>Unutilised commitment</span><strong>{money(Math.max(portfolio.allocation - portfolio.disbursed, 0))}</strong><small>Committed less cumulative deployment</small></div>
+          </div>
+        </div>
+      )}
+
+      {tab === "loans" && (
+        <div className="analytics-section analytics-two-column">
+          <article className="panel analytics-panel"><div className="panel__header"><div><h3>Gross loan book by product</h3><p>Outstanding principal, not cumulative originations</p></div></div><RankedBars items={products} /></article>
+          <article className="panel analytics-panel"><div className="panel__header"><div><h3>Remaining maturity distribution</h3><p>Active outstanding principal by contractual end date</p></div></div><RankedBars items={maturityValues} /></article>
+          <div className="analytics-kpis analytics-kpis--wide">
+            <div><span>Gross loans & advances</span><strong>{money(grossBook)}</strong><small>{activeLoans.length} active loans</small></div>
+            <div><span>Period / all-record originations</span><strong>{money(sumValues(loans, (loan) => loan.loan_amount))}</strong><small>{loans.length} originated loans in loaded scope</small></div>
+            <div><span>Average original loan size</span><strong>{loans.length ? money(sumValues(loans, (loan) => loan.loan_amount) / loans.length) : "N/A"}</strong><small>Originated principal ÷ originated count</small></div>
+            <div><span>Average active balance</span><strong>{activeLoans.length ? money(grossBook / activeLoans.length) : "N/A"}</strong><small>Gross book ÷ active loan count</small></div>
+          </div>
+        </div>
+      )}
+
+      {tab === "quality" && (
+        <div className="analytics-section analytics-two-column">
+          <article className="panel analytics-panel"><div className="panel__header"><div><h3>Portfolio at risk</h3><p>Outstanding principal by days-past-due threshold</p></div></div><RankedBars items={qualityRows} /></article>
+          <article className="panel analytics-panel"><div className="panel__header"><div><h3>Collection performance</h3><p>Contractually due versus eligible posted collections</p></div></div><RankedBars items={[{ label: "Amount due", value: dueAmount, color: "#d89a3a" }, { label: "Collected", value: collectedAmount, color: "#2f9d78" }, { label: "Overdue", value: overdueAmount, color: "#c94b59" }]} /></article>
+          <div className="analytics-kpis analytics-kpis--wide">
+            <div><span>NPL amount (90+ DPD)</span><strong>{money(nplAmount)}</strong><small>{percent(nplAmount, grossBook)?.toFixed(1) || "N/A"}% of gross loan book</small></div>
+            <div><span>Collection efficiency</span><strong>{percent(collectedAmount, dueAmount) == null ? "N/A" : `${percent(collectedAmount, dueAmount).toFixed(1)}%`}</strong><small>Collected ÷ amount due</small></div>
+            <div><span>Gross outstanding principal</span><strong>{money(grossBook)}</strong><small>Active, non-written-off balance</small></div>
+            <div><span>Overdue amount</span><strong>{money(overdueAmount)}</strong><small>Unpaid scheduled amount due</small></div>
+          </div>
+        </div>
+      )}
+
+      {tab === "customers" && (
+        <div className="analytics-section analytics-two-column">
+          <article className="panel analytics-panel"><div className="panel__header"><div><h3>Top 10 borrowers by exposure</h3><p>Borrower references · active outstanding principal</p></div></div><RankedBars items={topBorrowers} emptyText="No borrower exposure is available." /></article>
+          <article className="panel analytics-panel"><div className="panel__header"><div><h3>Most frequent borrowers</h3><p>Ranked by loan count, separate from exposure</p></div></div><RankedBars items={repeatBorrowers.map((item) => ({ ...item, value: item.count }))} valueFormatter={(value) => `${value} loans`} emptyText="No repeat borrowers are present in the loaded scope." /></article>
+          <div className="profile-coverage panel">
+            <div><ShieldCheck size={23} /><span><strong>Reference-based profile reporting</strong><small>Database borrower references are shown without exposing borrower names.</small></span></div>
+            <div className="coverage-grid"><span><strong>Gender</strong><small>Not supplied · 0% coverage</small></span><span><strong>Occupation</strong><small>Not supplied · 0% coverage</small></span><span><strong>Geography</strong><small>Not supplied · 0% coverage</small></span><span><strong>Income band</strong><small>Not supplied · 0% coverage</small></span></div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Overview({ onNavigate, onExplain }) {
   const { portfolio, societies } = usePortalData();
   const cashShare = portfolio.portfolioValue > 0
@@ -505,6 +768,8 @@ function Overview({ onNavigate, onExplain }) {
         <MetricCard label="Active exposure" value={money(portfolio.activeExposure)} note={`${portfolio.activeLoans} active ${portfolio.activeLoans === 1 ? "loan" : "loans"}`} icon={Activity} tone="amber" />
         <MetricCard label="Book performance" value={money(portfolio.performance)} note={portfolio.performancePct == null ? "Return unavailable" : `${portfolio.performancePct}% return`} icon={TrendingUp} tone="green" onExplain={() => onExplain("Book performance")} />
       </section>
+
+      <AnalyticsWorkspace onNavigate={onNavigate} />
 
       <section className="overview-grid">
         <article className="panel panel--chart">
@@ -676,10 +941,45 @@ function SocietiesPage({ onToast }) {
   );
 }
 
+const parseCsv = (text) => {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '"' && quoted && text[index + 1] === '"') {
+      cell += '"';
+      index += 1;
+    } else if (character === '"') {
+      quoted = !quoted;
+    } else if (character === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+    } else if ((character === "\n" || character === "\r") && !quoted) {
+      if (character === "\r" && text[index + 1] === "\n") index += 1;
+      row.push(cell);
+      if (row.some((value) => value.trim())) rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  row.push(cell);
+  if (row.some((value) => value.trim())) rows.push(row);
+  if (rows.length < 2) return [];
+  const headers = rows[0].map((value) => value.trim().toLowerCase());
+  return rows.slice(1).map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index]?.trim() || ""])));
+};
+
 function DisbursementsPage({ onToast }) {
-  const { loans, societies } = usePortalData();
+  const { loans, societies, portfolio } = usePortalData();
   const [statusCode, setStatusCode] = useState("AD");
   const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(() => new Set());
+  const [stagedRows, setStagedRows] = useState([]);
+  const [batchOpen, setBatchOpen] = useState(false);
   const societyById = new Map(societies.map((item) => [item.id, item.name]));
   const pipeline = loans.filter((loan) => ["AA", "AD"].includes(loan.status));
   const visible = pipeline.filter((loan) => {
@@ -691,47 +991,121 @@ function DisbursementsPage({ onToast }) {
   });
   const awaitingApproval = pipeline.filter((loan) => loan.status === "AA");
   const awaitingDisbursement = pipeline.filter((loan) => loan.status === "AD");
+  const selectedLoans = awaitingDisbursement.filter((loan) => selected.has(loan.id));
+  const selectedTotal = sumValues(selectedLoans, (loan) => loan.loan_amount);
+  const batchId = `RB-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${String(selectedLoans.length).padStart(3, "0")}`;
+
+  const toggleLoan = (loanId) => setSelected((current) => {
+    const next = new Set(current);
+    if (next.has(loanId)) next.delete(loanId); else next.add(loanId);
+    return next;
+  });
+  const toggleVisible = () => setSelected((current) => {
+    const next = new Set(current);
+    const eligible = visible.filter((loan) => loan.status === "AD");
+    const allSelected = eligible.length > 0 && eligible.every((loan) => next.has(loan.id));
+    eligible.forEach((loan) => allSelected ? next.delete(loan.id) : next.add(loan.id));
+    return next;
+  });
+
   const exportPipeline = () => {
+    if (!selectedLoans.length) return;
     downloadCsv(
-      "disbursement-pipeline.csv",
-      ["Loan ID", "Borrower reference", "Society", "Product", "Principal", "Approved date", "Status"],
-      visible.map((loan) => [
+      `${batchId}-payment-instructions.csv`,
+      ["batch_id", "batch_version", "row_id", "loan_id", "portfolio_code", "lending_society", "borrower_reference", "currency", "approved_principal", "deductions", "net_amount_payable", "requested_payment_date", "payment_status", "payment_reference", "paid_at", "failure_code", "failure_reason", "operator_comment"],
+      selectedLoans.map((loan) => [
+        batchId,
+        1,
+        loan.id,
         loan.loan_id,
-        maskedBorrower(loan.user_id),
+        portfolio.holderId?.slice(0, 8).toUpperCase(),
         societyById.get(loan.lending_society_id) || "Unknown society",
-        loan.loanType,
+        borrowerReference(loan.user_id),
+        "NAD",
         loan.loan_amount,
-        formatDate(loan.approved_at),
-        loanStatusLabel(loan.status),
+        0,
+        loan.loan_amount,
+        new Date().toISOString().slice(0, 10),
+        "NOT_PROCESSED",
+        "",
+        "",
+        "",
+        "",
+        "",
       ]),
     );
-    onToast("Disbursement pipeline downloaded.");
+    setBatchOpen(true);
+    onToast("Controlled payment instruction CSV downloaded for Excel.");
   };
+
+  const uploadResults = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      onToast("Use the exported CSV template; native XLSX parsing requires the server-side batch service.");
+      return;
+    }
+    const parsed = parseCsv(await file.text());
+    const pendingByLoan = new Map(awaitingDisbursement.map((loan) => [loan.loan_id, loan]));
+    const seen = new Set();
+    const validated = parsed.map((row, index) => {
+      const errors = [];
+      const status = row.payment_status?.toUpperCase();
+      if (!row.loan_id) errors.push("Missing loan_id");
+      if (!pendingByLoan.has(row.loan_id)) errors.push("Loan is not awaiting disbursement");
+      if (seen.has(row.loan_id)) errors.push("Duplicate loan_id");
+      seen.add(row.loan_id);
+      if (!["PAID", "FAILED", "REJECTED", "NOT_PROCESSED"].includes(status)) errors.push("Invalid payment_status");
+      if (status === "PAID" && !row.payment_reference) errors.push("PAID requires payment_reference");
+      if (status === "PAID" && !row.paid_at) errors.push("PAID requires paid_at");
+      if (["FAILED", "REJECTED"].includes(status) && !row.failure_reason) errors.push(`${status} requires failure_reason`);
+      if (row.batch_id && batchOpen && row.batch_id !== batchId) errors.push("Batch ID does not match current draft");
+      return { ...row, payment_status: status, rowNumber: index + 2, errors };
+    });
+    setStagedRows(validated);
+    onToast(`${validated.length} payment result rows staged for review; no loan records changed.`);
+  };
+  const stagedErrors = stagedRows.reduce((sum, row) => sum + row.errors.length, 0);
   return (
     <>
       <div className="disbursement-summary">
-        <div><span className="summary-icon summary-icon--teal"><CircleDollarSign size={20} /></span><p><span>Awaiting disbursement</span><strong>{money(awaitingDisbursement.reduce((sum, loan) => sum + Number(loan.loan_amount || 0), 0))}</strong><small>{awaitingDisbursement.length} approved {awaitingDisbursement.length === 1 ? "loan" : "loans"}</small></p></div>
-        <div><span className="summary-icon summary-icon--amber"><Clock3 size={20} /></span><p><span>Awaiting approval</span><strong>{money(awaitingApproval.reduce((sum, loan) => sum + Number(loan.loan_amount || 0), 0))}</strong><small>{awaitingApproval.length} pending {awaitingApproval.length === 1 ? "decision" : "decisions"}</small></p></div>
-        <div><span className="summary-icon summary-icon--blue"><Layers3 size={20} /></span><p><span>Portal access</span><strong>Read only</strong><small>Batches are managed operationally</small></p></div>
+        <div><span className="summary-icon summary-icon--teal"><CircleDollarSign size={20} /></span><p><span>Awaiting disbursement</span><strong>{money(sumValues(awaitingDisbursement, (loan) => loan.loan_amount))}</strong><small>{awaitingDisbursement.length} approved {awaitingDisbursement.length === 1 ? "loan" : "loans"}</small></p></div>
+        <div><span className="summary-icon summary-icon--amber"><Clock3 size={20} /></span><p><span>Awaiting approval</span><strong>{money(sumValues(awaitingApproval, (loan) => loan.loan_amount))}</strong><small>{awaitingApproval.length} pending {awaitingApproval.length === 1 ? "decision" : "decisions"}</small></p></div>
+        <div><span className="summary-icon summary-icon--blue"><Layers3 size={20} /></span><p><span>Selected for draft batch</span><strong>{money(selectedTotal)}</strong><small>{selectedLoans.length} payment instructions</small></p></div>
       </div>
+      <section className="panel batch-workspace">
+        <div className="panel__header"><div><h3>Payment batch workspace</h3><p>Select eligible loans, export an Excel-compatible instruction file, then stage payment results for validation.</p></div><span className="status-badge status-badge--warning">Frontend staging · no ledger posting</span></div>
+        <div className="batch-controls">
+          <div><span>Draft batch ID</span><strong>{selectedLoans.length ? batchId : "Select eligible loans"}</strong></div>
+          <div><span>Items</span><strong>{selectedLoans.length}</strong></div>
+          <div><span>Net payable</span><strong>{money(selectedTotal)}</strong></div>
+          <div><span>Available cash after batch</span><strong>{money(portfolio.cash - selectedTotal)}</strong></div>
+          <button type="button" className="secondary-button" disabled={!selectedLoans.length} onClick={() => setBatchOpen(true)}><FileCheck2 size={15} /> Review draft</button>
+          <button type="button" className="primary-button" disabled={!selectedLoans.length} onClick={exportPipeline}><Download size={15} /> Export for Excel</button>
+          <label className="secondary-button upload-button"><Upload size={15} /> Upload payment results<input type="file" accept=".csv,text/csv" onChange={uploadResults} /></label>
+        </div>
+        {batchOpen && <div className="batch-notice"><ShieldCheck size={18} /><div><strong>Maker-checker control required</strong><p>This draft can be exported and reviewed here. Final batch approval, XLSX protection, payment posting, idempotency, reversals and audit events must be completed by the server-side disbursement service before production use.</p></div></div>}
+      </section>
       <section className="panel page-panel">
         <div className="status-tabs">
-          {[["AD", "Awaiting disbursement", awaitingDisbursement.length], ["AA", "Awaiting approval", awaitingApproval.length]].map(([code, label, count]) => <button className={statusCode === code ? "active" : ""} key={code} onClick={() => setStatusCode(code)}>{label}<span>{count}</span></button>)}
+          {[["AD", "Eligible / awaiting disbursement", awaitingDisbursement.length], ["AA", "Awaiting approval", awaitingApproval.length]].map(([code, label, count]) => <button className={statusCode === code ? "active" : ""} key={code} onClick={() => setStatusCode(code)}>{label}<span>{count}</span></button>)}
         </div>
         <div className="table-toolbar">
           <div className="search-box"><Search size={16} /><input placeholder="Search loan or society…" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
           <div className="table-toolbar__spacer" />
-          <button className="secondary-button" onClick={exportPipeline}><Download size={15} /> Export CSV</button>
+          <small className="selection-count">{selectedLoans.length} selected</small>
         </div>
         <div className="data-table-wrap">
-          <table className="data-table">
-            <thead><tr><th>Loan</th><th>Borrower reference</th><th>Society & product</th><th>Principal</th><th>Approved</th><th>Status</th></tr></thead>
+          <table className="data-table disbursement-table">
+            <thead><tr><th className="checkbox-column"><input type="checkbox" aria-label="Select all visible eligible loans" checked={visible.some((loan) => loan.status === "AD") && visible.filter((loan) => loan.status === "AD").every((loan) => selected.has(loan.id))} onChange={toggleVisible} /></th><th>Loan</th><th>Borrower reference</th><th>Society & product</th><th>Principal / net payable</th><th>Approved</th><th>Status</th></tr></thead>
             <tbody>{visible.map((loan) => (
-              <tr key={loan.id}>
-                <td><strong>{loan.loan_id}</strong></td>
-                <td>{maskedBorrower(loan.user_id)}</td>
+              <tr key={loan.id} className={selected.has(loan.id) ? "row-selected" : ""}>
+                <td className="checkbox-column"><input type="checkbox" disabled={loan.status !== "AD"} checked={selected.has(loan.id)} onChange={() => toggleLoan(loan.id)} aria-label={`Select loan ${loan.loan_id}`} /></td>
+                <td><strong>{loan.loan_id}</strong><small className="cell-sub">Row {loan.id.slice(0, 8).toUpperCase()}</small></td>
+                <td>{borrowerReference(loan.user_id)}</td>
                 <td><strong>{societyById.get(loan.lending_society_id) || "Unknown society"}</strong><small className="cell-sub">{loan.loanType}</small></td>
-                <td className="mono"><strong>{money(loan.loan_amount)}</strong></td>
+                <td className="mono"><strong>{money(loan.loan_amount)}</strong><small className="cell-sub">NAD · deductions 0.00</small></td>
                 <td>{formatDate(loan.approved_at)}</td>
                 <td><Status status={loanStatusLabel(loan.status)} code={loan.status} /></td>
               </tr>
@@ -740,6 +1114,13 @@ function DisbursementsPage({ onToast }) {
         </div>
         {!visible.length && <div className="empty-table">No loans match this pipeline status.</div>}
       </section>
+      {stagedRows.length > 0 && (
+        <section className="panel page-panel validation-preview">
+          <div className="panel__header"><div><h3>Payment-results dry-run preview</h3><p>Uploaded rows are staged in the browser only. Review validation outcomes before any future checker approval.</p></div><span className={stagedErrors ? "status-badge status-badge--error" : "status-badge status-badge--success"}>{stagedErrors ? `${stagedErrors} validation errors` : "All rows passed"}</span></div>
+          <div className="data-table-wrap"><table className="data-table"><thead><tr><th>Row</th><th>Loan</th><th>Payment status</th><th>Reference</th><th>Paid at</th><th>Validation</th></tr></thead><tbody>{stagedRows.map((row) => <tr key={`${row.rowNumber}-${row.loan_id}`}><td>{row.rowNumber}</td><td><strong>{row.loan_id || "Missing"}</strong></td><td><Status status={row.payment_status || "Invalid"} code={row.payment_status === "PAID" ? "PU" : row.payment_status === "FAILED" ? "BL" : "AD"} /></td><td>{row.payment_reference || "—"}</td><td>{row.paid_at || "—"}</td><td>{row.errors.length ? <span className="validation-error">{row.errors.join("; ")}</span> : <span className="validation-pass"><Check size={14} /> Passed</span>}</td></tr>)}</tbody></table></div>
+          <div className="validation-actions"><button type="button" className="secondary-button" onClick={() => setStagedRows([])}>Clear staging</button><button type="button" className="primary-button" disabled title="Requires server-side checker approval and atomic ledger service">Approve & post (backend required)</button></div>
+        </section>
+      )}
     </>
   );
 }
@@ -766,7 +1147,7 @@ function LoansPage({ onToast }) {
       ["Loan ID", "Borrower reference", "Lending society", "Product", "Principal", "Active balance", "Due date", "Status"],
       filtered.map((loan) => [
         loan.loan_id,
-        maskedBorrower(loan.user_id),
+        borrowerReference(loan.user_id),
         societyById.get(loan.lending_society_id) || "Unknown society",
         loan.loanType,
         loan.loan_amount,
@@ -790,7 +1171,7 @@ function LoansPage({ onToast }) {
       <div className="data-table-wrap"><table className="data-table">
         <thead><tr><th>Loan ID</th><th>Borrower reference</th><th>Lending society</th><th>Product</th><th>Original principal</th><th>Active balance</th><th>Due date</th><th>Status</th></tr></thead>
         <tbody>{filtered.map((loan) => <tr key={loan.id}>
-          <td><strong>{loan.loan_id}</strong></td><td>{maskedBorrower(loan.user_id)}</td><td>{societyById.get(loan.lending_society_id) || "Unknown society"}</td><td>{loan.loanType}</td><td className="mono">{money(loan.loan_amount)}</td><td className="mono"><strong>{money(loan.outstanding_balance)}</strong></td><td>{formatDate(loan.due_date || loan.final_deduction_date)}</td><td><Status status={loanStatusLabel(loan.status)} code={loan.status} /></td>
+          <td><strong>{loan.loan_id}</strong></td><td>{borrowerReference(loan.user_id)}</td><td>{societyById.get(loan.lending_society_id) || "Unknown society"}</td><td>{loan.loanType}</td><td className="mono">{money(loan.loan_amount)}</td><td className="mono"><strong>{money(loan.outstanding_balance)}</strong></td><td>{formatDate(loan.due_date || loan.final_deduction_date)}</td><td><Status status={loanStatusLabel(loan.status)} code={loan.status} /></td>
         </tr>)}</tbody>
       </table></div>
       {!filtered.length && <div className="empty-table">No loans match the current search and status.</div>}
@@ -802,47 +1183,47 @@ function CollectionsPage({ onToast }) {
   const { portfolio, monthlySeries = [], payments, societies } = usePortalData();
   const societyById = new Map(societies.map((item) => [item.id, item.name]));
   const maxMonthly = Math.max(1, ...monthlySeries.flatMap((item) => [item.due, item.collected]));
-  const recentPayments = [...payments]
+  const receivedPayments = [...payments]
     .filter((payment) => Number(payment.amount_paid) > 0)
-    .sort((a, b) => new Date(b.payment_date || b.created_at) - new Date(a.payment_date || a.created_at))
-    .slice(0, 5);
-  const exportLedger = () => {
-    downloadCsv(
-      "collections-ledger.csv",
-      ["Payment reference", "Loan ID", "Society", "Amount due", "Amount paid", "Payment date", "Status", "Days late"],
-      payments.map((payment) => [
-        payment.payment_ref || payment.id,
-        payment.loan_id,
-        societyById.get(payment.lending_society_id) || "Unknown society",
-        payment.amount_due,
-        payment.amount_paid,
-        formatDate(payment.payment_date),
-        payment.status,
-        payment.days_late ?? "",
-      ]),
-    );
-    onToast("Collections ledger downloaded.");
-  };
+    .sort((a, b) => new Date(b.payment_date || b.created_at) - new Date(a.payment_date || a.created_at));
+  const recentPayments = receivedPayments.slice(0, 8);
+  const totalReceived = receivedPayments.reduce(
+    (total, payment) => total + Number(payment.amount_paid || 0),
+    0,
+  );
+  const collectingSocieties = new Set(
+    receivedPayments.map((payment) => payment.lending_society_id).filter(Boolean),
+  ).size;
+  const latestCollection = receivedPayments[0]?.payment_date || receivedPayments[0]?.created_at;
   return (
-    <div className="collection-grid">
-      <section className="panel collection-hero">
-        <div className="panel__header"><div><h3>Collection performance</h3><p>Contractually due versus received by month</p></div></div>
-        <div className="collection-bars">
-          {monthlySeries.map((item) => <div key={item.key}><span className="bars"><i style={{height:`${(item.due / maxMonthly) * 180}px`}} /><b style={{height:`${(item.collected / maxMonthly) * 180}px`}} /></span><small>{item.month}</small></div>)}
-        </div>
-        <div className="legend legend--center"><span><i className="legend__pale" /> Contractually due</span><span><i className="legend__teal" /> Collected</span></div>
-        {!monthlySeries.length && <div className="empty-table">No dated payment records available.</div>}
+    <div className="collections-page">
+      <section className="collection-summary" aria-label="Collection summary">
+        <article><span className="summary-icon summary-icon--green"><HandCoins size={18} /></span><div><small>Total received</small><strong>{money(totalReceived)}</strong><p>Confirmed amount paid records</p></div></article>
+        <article><span className="summary-icon"><ReceiptText size={18} /></span><div><small>Payments received</small><strong>{receivedPayments.length}</strong><p>Across the visible portfolio</p></div></article>
+        <article><span className="summary-icon"><Building2 size={18} /></span><div><small>Collecting societies</small><strong>{collectingSocieties}</strong><p>With recorded payments</p></div></article>
+        <article><span className="summary-icon"><Clock3 size={18} /></span><div><small>Latest receipt</small><strong className="collection-summary__date">{latestCollection ? formatDate(latestCollection) : "None recorded"}</strong><p>Most recent payment date</p></div></article>
       </section>
-      <section className="panel collection-score">
-        <span>Collection efficiency</span><strong>{portfolio.collectionEfficiency == null ? "N/A" : `${portfolio.collectionEfficiency}%`}</strong><p>Recorded amount paid divided by recorded amount due.</p>
-        <div className="score-track"><i style={{ width: `${Math.min(portfolio.collectionEfficiency ?? 0, 100)}%` }} /></div>
-        <div><small>Source: loan_payments</small><small>{payments.length} payment records</small></div>
-      </section>
-      <section className="panel collection-table">
-        <div className="panel__header"><div><h3>Recent collections</h3><p>Payment records with a collected amount</p></div><button className="link-button" onClick={exportLedger}>Download ledger <Download size={15} /></button></div>
-        {recentPayments.map((payment) => <div className="recent-row" key={payment.id}><span className="summary-icon summary-icon--green"><Check size={16} /></span><div><strong>{payment.payment_ref || payment.loan_id}</strong><small>{societyById.get(payment.lending_society_id) || "Unknown society"}</small></div><strong>{money(payment.amount_paid)}</strong><span>{formatDate(payment.payment_date || payment.created_at)}</span></div>)}
-        {!recentPayments.length && <div className="empty-table">No collected payments available.</div>}
-      </section>
+      <div className="collection-grid">
+        <section className="panel collection-hero">
+          <div className="panel__header"><div><h3>Received versus due</h3><p>Contractual repayments and amounts actually received by month</p></div></div>
+          <div className="collection-bars">
+            {monthlySeries.map((item) => <div key={item.key}><span className="bars"><i style={{height:`${(item.due / maxMonthly) * 180}px`}} /><b style={{height:`${(item.collected / maxMonthly) * 180}px`}} /></span><small>{item.month}</small></div>)}
+          </div>
+          <div className="legend legend--center"><span><i className="legend__pale" /> Contractually due</span><span><i className="legend__teal" /> Payment received</span></div>
+          {!monthlySeries.length && <div className="empty-table">No dated payment records available.</div>}
+        </section>
+        <section className="panel collection-score">
+          <span>Collection efficiency</span><strong>{portfolio.collectionEfficiency == null ? "N/A" : `${portfolio.collectionEfficiency}%`}</strong><p>Amount received divided by the contractual amount due in the visible payment records.</p>
+          <div className="score-track"><i style={{ width: `${Math.min(portfolio.collectionEfficiency ?? 0, 100)}%` }} /></div>
+          <div><small>Source: loan_payments</small><small>{receivedPayments.length} received payments</small></div>
+        </section>
+        <section className="panel collection-table">
+          <div className="panel__header"><div><h3>Recent collections</h3><p>Payments received, ordered by most recent receipt date</p></div></div>
+          {!!recentPayments.length && <div className="collection-ledger-head"><span>Loan ID</span><span>Lending society</span><span>Amount received</span><span>Received date</span></div>}
+          {recentPayments.map((payment) => <div className="recent-row" key={payment.id}><div className="collection-loan"><span className="summary-icon summary-icon--green"><Check size={16} /></span><strong>{payment.loan_id || "Loan ID unavailable"}</strong></div><span>{societyById.get(payment.lending_society_id) || "Unknown society"}</span><strong>{money(payment.amount_paid)}</strong><time>{formatDate(payment.payment_date || payment.created_at)}</time></div>)}
+          {!recentPayments.length && <div className="empty-table">No received payments are recorded.</div>}
+        </section>
+      </div>
     </div>
   );
 }
