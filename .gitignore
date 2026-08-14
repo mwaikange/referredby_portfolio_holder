@@ -7,3 +7,5 @@ tmp/
 supabase/.temp/
 supabase/remote-public-schema.sql
 
+.vercel/
+.env.local
